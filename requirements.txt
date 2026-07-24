@@ -1,0 +1,8 @@
+streamlit
+chromadb
+sentence-transformers
+groq
+pypdf
+python-docx
+openpyxl
+python-pptx
