@@ -26,7 +26,7 @@ def load_embedder():
 
 @st.cache_resource
 def get_groq_client():
-    return Groq(api_key=st.secrets["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"])
+    return Groq(api_key=st.secrets["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"])
 
 embedder = load_embedder()
 client = get_groq_client()
