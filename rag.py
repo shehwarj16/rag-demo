@@ -10,7 +10,7 @@ embedder = SentenceTransformer('all-MiniLM-L6-v2')
 chroma_client = chromadb.Client()
 collection = chroma_client.create_collection(name="company_docs")
 
-client = Anthropic(api_key="gsk_sqv0Q7tk3NLSsBdBfe90WGdyb3FYzBEnWkAZSTRs1hJEMr7tej4Fstreamlit run app.py")
+client = Anthropic(api_key="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")
 
 # ---- STEP 1: LOAD DOCUMENTS ----
 docs_folder = "docs"

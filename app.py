@@ -7,11 +7,17 @@ from docx import Document
 import openpyxl
 from pptx import Presentation
 import io
+import os
+import pickle
 
 # ---- PAGE SETUP ----
 st.set_page_config(page_title="Company Knowledge Assistant", page_icon="📄")
 st.title("📄 Company Knowledge Assistant")
-st.write("Upload company documents, then ask questions about them.")
+
+# ---- PERSISTENT STORAGE PATHS (survive across different users' sessions) ----
+STORAGE_DIR = "shared_data"
+DOCS_DATA_FILE = os.path.join(STORAGE_DIR, "documents.pkl")
+os.makedirs(STORAGE_DIR, exist_ok=True)
 
 # ---- LOAD MODELS (cached so it only loads once) ----
 @st.cache_resource
@@ -20,13 +26,12 @@ def load_embedder():
 
 @st.cache_resource
 def get_groq_client():
-
-    return Groq(api_key=st.secrets["GROQ_API_KEY"])
+    return Groq(api_key=st.secrets["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"])
 
 embedder = load_embedder()
 client = get_groq_client()
 
-# ---- HELPER FUNCTIONS TO READ DIFFERENT FILE TYPES (from uploaded file objects) ----
+# ---- HELPER FUNCTIONS TO READ DIFFERENT FILE TYPES ----
 def read_txt(file_obj):
     return file_obj.read().decode("utf-8")
 
@@ -81,62 +86,95 @@ def extract_text(uploaded_file):
     else:
         return ""
 
-# ---- SESSION STATE SETUP ----
+# ---- SAVE / LOAD SHARED DOCUMENT DATA (so all users see the same documents) ----
+def save_shared_documents(documents, filenames):
+    with open(DOCS_DATA_FILE, "wb") as f:
+        pickle.dump({"documents": documents, "filenames": filenames}, f)
+
+def load_shared_documents():
+    if os.path.exists(DOCS_DATA_FILE):
+        with open(DOCS_DATA_FILE, "rb") as f:
+            data = pickle.load(f)
+        return data["documents"], data["filenames"]
+    return [], []
+
+@st.cache_resource
+def build_collection_from_shared_data():
+    documents, filenames = load_shared_documents()
+    chroma_client = chromadb.Client()
+    collection = chroma_client.get_or_create_collection(name="shared_docs")
+    if documents:
+        embeddings = embedder.encode(documents).tolist()
+        collection.add(documents=documents, embeddings=embeddings, ids=filenames)
+    return collection, filenames
+
+# ---- SIDEBAR: ADMIN SECTION (password protected) ----
+with st.sidebar:
+    st.subheader("Admin: Manage Documents")
+    admin_password = st.text_input("Admin password", type="password")
+
+    if admin_password == st.secrets.get("ADMIN_PASSWORD", ""):
+        st.success("Admin access granted")
+
+        uploaded_files = st.file_uploader(
+            "Upload PDF, Word, Excel, PowerPoint, or text files",
+            type=["txt", "pdf", "docx", "xlsx", "pptx"],
+            accept_multiple_files=True,
+        )
+
+        if st.button("Process and share these documents"):
+            if uploaded_files:
+                with st.spinner("Reading and indexing documents..."):
+                    documents = []
+                    filenames = []
+
+                    for uploaded_file in uploaded_files:
+                        try:
+                            text = extract_text(uploaded_file)
+                            if text.strip():
+                                documents.append(text)
+                                filenames.append(uploaded_file.name)
+                            else:
+                                st.warning(f"No text extracted from {uploaded_file.name}")
+                        except Exception as e:
+                            st.error(f"Error reading {uploaded_file.name}: {e}")
+
+                    if documents:
+                        save_shared_documents(documents, filenames)
+                        st.cache_resource.clear()  # force reload of shared collection
+                        st.success(f"Saved {len(filenames)} documents. Everyone using the app link will now see these.")
+                        st.rerun()
+            else:
+                st.warning("Please upload at least one file first.")
+
+        # Show currently shared documents with an option to clear them
+        _, current_filenames = load_shared_documents()
+        if current_filenames:
+            st.write("Currently shared documents:")
+            st.write(current_filenames)
+            if st.button("Clear all shared documents"):
+                save_shared_documents([], [])
+                st.cache_resource.clear()
+                st.rerun()
+    elif admin_password:
+        st.error("Incorrect password")
+
+# ---- MAIN AREA: CHAT (visible to everyone, no password needed) ----
+collection, loaded_files = build_collection_from_shared_data()
+
+if loaded_files:
+    st.caption(f"Ready to answer questions from: {', '.join(loaded_files)}")
+else:
+    st.info("No documents have been loaded yet. Please check back soon.")
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
-if "collection" not in st.session_state:
-    st.session_state.collection = None
-if "loaded_files" not in st.session_state:
-    st.session_state.loaded_files = []
 
-# ---- FILE UPLOAD UI ----
-st.subheader("1. Upload your documents")
-uploaded_files = st.file_uploader(
-    "Upload PDF, Word, Excel, PowerPoint, or text files",
-    type=["txt", "pdf", "docx", "xlsx", "pptx"],
-    accept_multiple_files=True,
-)
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.write(message["content"])
 
-if st.button("Process documents"):
-    if uploaded_files:
-        with st.spinner("Reading and indexing documents..."):
-            documents = []
-            filenames = []
-
-            for uploaded_file in uploaded_files:
-                try:
-                    text = extract_text(uploaded_file)
-                    if text.strip():
-                        documents.append(text)
-                        filenames.append(uploaded_file.name)
-                    else:
-                        st.warning(f"No text extracted from {uploaded_file.name} (might be a scanned/image file)")
-                except Exception as e:
-                    st.error(f"Error reading {uploaded_file.name}: {e}")
-
-            if documents:
-                chroma_client = chromadb.Client()
-                # Use get_or_create to avoid "already exists" errors on rerun
-                collection = chroma_client.get_or_create_collection(name="session_docs")
-                embeddings = embedder.encode(documents).tolist()
-                collection.add(documents=documents, embeddings=embeddings, ids=filenames)
-
-                st.session_state.collection = collection
-                st.session_state.loaded_files = filenames
-                st.session_state.messages = []  # reset chat when new documents are loaded
-
-        st.success(f"Loaded {len(st.session_state.loaded_files)} documents: {', '.join(st.session_state.loaded_files)}")
-    else:
-        st.warning("Please upload at least one file first.")
-
-# ---- CHAT SECTION (only shown once documents are processed) ----
-if st.session_state.collection is not None:
-    st.subheader("2. Ask questions")
-
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-
+if loaded_files:
     question = st.chat_input("Type your question here...")
 
     if question:
@@ -148,7 +186,7 @@ if st.session_state.collection is not None:
             with st.spinner("Searching documents and generating answer..."):
                 question_embedding = embedder.encode([question]).tolist()
 
-                results = st.session_state.collection.query(
+                results = collection.query(
                     query_embeddings=question_embedding,
                     n_results=2
                 )
@@ -179,5 +217,3 @@ QUESTION: {question}
                     st.write(retrieved_files)
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
-else:
-    st.info("Upload documents and click 'Process documents' to start asking questions.")
