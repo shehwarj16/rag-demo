@@ -6,3 +6,12 @@ pypdf
 python-docx
 openpyxl
 python-pptx
+streamlit
+chromadb
+sentence-transformers
+groq
+pypdf
+python-docx
+openpyxl
+python-pptx
+dropbox
