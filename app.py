@@ -7,17 +7,34 @@ from docx import Document
 import openpyxl
 from pptx import Presentation
 import io
-import os
+import dropbox
 import pickle
 
 # ---- PAGE SETUP ----
 st.set_page_config(page_title="Company Knowledge Assistant", page_icon="📄")
 st.title("📄 Company Knowledge Assistant")
 
-# ---- PERSISTENT STORAGE PATHS (survive across different users' sessions) ----
-STORAGE_DIR = "shared_data"
-DOCS_DATA_FILE = os.path.join(STORAGE_DIR, "documents.pkl")
-os.makedirs(STORAGE_DIR, exist_ok=True)
+# ---- DROPBOX SETUP ----
+DROPBOX_FILE_PATH = "/documents_data.pkl"  # a single file inside your app's Dropbox folder
+
+@st.cache_resource
+def get_dropbox_client():
+    return dropbox.Dropbox(st.secrets["DROPBOX_TOKEN"])
+
+dbx = get_dropbox_client()
+
+def save_to_dropbox(documents, filenames):
+    data = pickle.dumps({"documents": documents, "filenames": filenames})
+    dbx.files_upload(data, DROPBOX_FILE_PATH, mode=dropbox.files.WriteMode("overwrite"))
+
+def load_from_dropbox():
+    try:
+        _, res = dbx.files_download(DROPBOX_FILE_PATH)
+        data = pickle.loads(res.content)
+        return data["documents"], data["filenames"]
+    except dropbox.exceptions.ApiError:
+        # File doesn't exist yet (first run, nothing uploaded)
+        return [], []
 
 # ---- LOAD MODELS (cached so it only loads once) ----
 @st.cache_resource
@@ -86,21 +103,10 @@ def extract_text(uploaded_file):
     else:
         return ""
 
-# ---- SAVE / LOAD SHARED DOCUMENT DATA (so all users see the same documents) ----
-def save_shared_documents(documents, filenames):
-    with open(DOCS_DATA_FILE, "wb") as f:
-        pickle.dump({"documents": documents, "filenames": filenames}, f)
-
-def load_shared_documents():
-    if os.path.exists(DOCS_DATA_FILE):
-        with open(DOCS_DATA_FILE, "rb") as f:
-            data = pickle.load(f)
-        return data["documents"], data["filenames"]
-    return [], []
-
+# ---- BUILD SEARCHABLE COLLECTION FROM DROPBOX DATA ----
 @st.cache_resource
-def build_collection_from_shared_data():
-    documents, filenames = load_shared_documents()
+def build_collection_from_dropbox():
+    documents, filenames = load_from_dropbox()
     chroma_client = chromadb.Client()
     collection = chroma_client.get_or_create_collection(name="shared_docs")
     if documents:
@@ -124,7 +130,7 @@ with st.sidebar:
 
         if st.button("Process and share these documents"):
             if uploaded_files:
-                with st.spinner("Reading and indexing documents..."):
+                with st.spinner("Reading documents and saving to Dropbox..."):
                     documents = []
                     filenames = []
 
@@ -140,27 +146,27 @@ with st.sidebar:
                             st.error(f"Error reading {uploaded_file.name}: {e}")
 
                     if documents:
-                        save_shared_documents(documents, filenames)
-                        st.cache_resource.clear()  # force reload of shared collection
-                        st.success(f"Saved {len(filenames)} documents. Everyone using the app link will now see these.")
+                        save_to_dropbox(documents, filenames)
+                        st.cache_resource.clear()  # force reload from Dropbox
+                        st.success(f"Saved {len(filenames)} documents to Dropbox. Everyone using the app link will now see these.")
                         st.rerun()
             else:
                 st.warning("Please upload at least one file first.")
 
         # Show currently shared documents with an option to clear them
-        _, current_filenames = load_shared_documents()
+        _, current_filenames = load_from_dropbox()
         if current_filenames:
             st.write("Currently shared documents:")
             st.write(current_filenames)
             if st.button("Clear all shared documents"):
-                save_shared_documents([], [])
+                save_to_dropbox([], [])
                 st.cache_resource.clear()
                 st.rerun()
     elif admin_password:
         st.error("Incorrect password")
 
 # ---- MAIN AREA: CHAT (visible to everyone, no password needed) ----
-collection, loaded_files = build_collection_from_shared_data()
+collection, loaded_files = build_collection_from_dropbox()
 
 if loaded_files:
     st.caption(f"Ready to answer questions from: {', '.join(loaded_files)}")
